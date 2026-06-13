@@ -6,7 +6,9 @@ import yfinance as yf
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor
+import time
+import warnings
+warnings.filterwarnings('ignore')
 
 st.set_page_config(page_title="Swing Algo Dashboard", page_icon="📈", layout="wide")
 
@@ -26,9 +28,8 @@ SYMBOLS = [
     'SUNPHARMA.NS','ULTRACEMCO.NS','TITAN.NS','NTPC.NS','POWERGRID.NS','ONGC.NS',
     'TATAMOTORS.NS','HCLTECH.NS','WIPRO.NS','TECHM.NS','ADANIPORTS.NS',
     'ASIANPAINT.NS','NESTLEIND.NS','BAJAJFINSV.NS','INDUSINDBK.NS',
-    'DRREDDY.NS','CIPLA.NS','DIVISLAB.NS','APOLLOHOSP.NS','GRASIM.NS',
-    'JSWSTEEL.NS','TATASTEEL.NS','HINDALCO.NS','COALINDIA.NS',
-    'PIDILITIND.NS','HAVELLS.NS','DMART.NS','IRCTC.NS','ZOMATO.NS'
+    'DRREDDY.NS','CIPLA.NS','GRASIM.NS','JSWSTEEL.NS','TATASTEEL.NS',
+    'HINDALCO.NS','COALINDIA.NS','PIDILITIND.NS','HAVELLS.NS','DMART.NS'
 ]
 
 SECTOR_MAP = {
@@ -38,10 +39,22 @@ SECTOR_MAP = {
     'ULTRACEMCO':'Cement','TITAN':'Retail','NTPC':'Power','POWERGRID':'Power','ONGC':'Energy',
     'TATAMOTORS':'Auto','HCLTECH':'IT','WIPRO':'IT','TECHM':'IT','ADANIPORTS':'Infra',
     'ASIANPAINT':'Paints','NESTLEIND':'FMCG','BAJAJFINSV':'Finance','INDUSINDBK':'Banking',
-    'DRREDDY':'Pharma','CIPLA':'Pharma','DIVISLAB':'Pharma','APOLLOHOSP':'Healthcare',
-    'GRASIM':'Cement','JSWSTEEL':'Metal','TATASTEEL':'Metal','HINDALCO':'Metal',
-    'COALINDIA':'Energy','PIDILITIND':'Chemicals','HAVELLS':'Consumer',
-    'DMART':'Retail','IRCTC':'Travel','ZOMATO':'Consumer'
+    'DRREDDY':'Pharma','CIPLA':'Pharma','GRASIM':'Cement','JSWSTEEL':'Metal',
+    'TATASTEEL':'Metal','HINDALCO':'Metal','COALINDIA':'Energy',
+    'PIDILITIND':'Chemicals','HAVELLS':'Consumer','DMART':'Retail'
+}
+
+# ── Static market cap (Cr) to avoid tk.info timeout ──────────────────────────
+MCAP = {
+    'RELIANCE':1980000,'TCS':1400000,'INFY':600000,'HDFCBANK':1200000,'ICICIBANK':900000,
+    'SBIN':700000,'BHARTIARTL':800000,'ITC':560000,'LT':480000,'HINDUNILVR':520000,
+    'KOTAKBANK':340000,'AXISBANK':320000,'BAJFINANCE':430000,'MARUTI':390000,
+    'SUNPHARMA':380000,'ULTRACEMCO':310000,'TITAN':290000,'NTPC':310000,
+    'POWERGRID':260000,'ONGC':280000,'TATAMOTORS':270000,'HCLTECH':360000,
+    'WIPRO':240000,'TECHM':130000,'ADANIPORTS':250000,'ASIANPAINT':210000,
+    'NESTLEIND':200000,'BAJAJFINSV':230000,'INDUSINDBK':110000,'DRREDDY':130000,
+    'CIPLA':100000,'GRASIM':170000,'JSWSTEEL':210000,'TATASTEEL':160000,
+    'HINDALCO':130000,'COALINDIA':230000,'PIDILITIND':110000,'HAVELLS':95000,'DMART':260000
 }
 
 def ema(s, n): return s.ewm(span=n, adjust=False).mean()
@@ -68,12 +81,21 @@ def vwap_roll(df, n=20):
     tp = (df['High'] + df['Low'] + df['Close']) / 3
     return (tp * df['Volume']).rolling(n).sum() / df['Volume'].rolling(n).sum()
 
-def process_symbol(sym):
+def process_row(sym, df_all):
     try:
-        tk = yf.Ticker(sym)
-        df = tk.history(period="400d", interval="1d", auto_adjust=False)
-        if df is None or len(df) < 220:
+        # Extract single ticker from batch download
+        if isinstance(df_all.columns, pd.MultiIndex):
+            cols = ['Open','High','Low','Close','Volume','Adj Close']
+            available = [c for c in cols if (c, sym) in df_all.columns]
+            df = df_all[[( c, sym) for c in available if c in ['High','Low','Close','Volume']]].copy()
+            df.columns = [c for c in ['High','Low','Close','Volume'] if (c, sym) in df_all.columns]
+        else:
+            df = df_all[['High','Low','Close','Volume']].copy()
+
+        df = df.dropna()
+        if len(df) < 220:
             return None
+
         df['e20'] = ema(df['Close'], 20)
         df['e50'] = ema(df['Close'], 50)
         df['e200'] = ema(df['Close'], 200)
@@ -82,21 +104,22 @@ def process_symbol(sym):
         df['atr'] = atr_calc(df)
         df['vsma10'] = df['Volume'].rolling(10).mean()
         df['vwap20'] = vwap_roll(df)
+
         l = df.iloc[-1]
         atr_pct = l['atr'] / l['Close'] * 100
         r_sl = l['atr'] * 1.5
         r_tg = l['atr'] * 3
         rr = r_tg / r_sl if r_sl > 0 else 0
         cp = (l['Close'] - l['Low']) / (l['High'] - l['Low']) if (l['High'] - l['Low']) > 0 else 0
-        info = tk.info
-        mcap = (info.get('marketCap') or 0) / 1e7
         name = sym.replace('.NS', '')
+        mcap = MCAP.get(name, 50000)
+
         return dict(
             Symbol=name, Sector=SECTOR_MAP.get(name, 'Other'),
             CMP=round(float(l['Close']), 2),
             Target=round(float(l['Close'] + r_tg), 2),
             SL=round(float(l['Close'] - r_sl), 2),
-            MCap_Cr=round(float(mcap), 0),
+            MCap_Cr=mcap,
             Volume=int(l['Volume']), VolSMA10=round(float(l['vsma10']), 0),
             EMA20=round(float(l['e20']), 2), EMA50=round(float(l['e50']), 2), EMA200=round(float(l['e200']), 2),
             RSI=round(float(l['rsi']), 2),
@@ -107,38 +130,68 @@ def process_symbol(sym):
             Upside_Pct=round(r_tg / l['Close'] * 100, 2),
             Risk_Pct=round(r_sl / l['Close'] * 100, 2)
         )
-    except:
+    except Exception:
         return None
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_vix():
     try:
-        v = yf.Ticker('^INDIAVIX').history(period='5d')
-        return round(float(v['Close'].iloc[-1]), 2)
-    except:
-        return 14.5
+        v = yf.download('^INDIAVIX', period='5d', interval='1d', progress=False, auto_adjust=False)
+        if v is not None and len(v) > 0:
+            return round(float(v['Close'].iloc[-1]), 2)
+    except Exception:
+        pass
+    return 14.5
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_nifty():
     try:
-        df = yf.Ticker('^NSEI').history(period='6mo', interval='1d', auto_adjust=False)
-        df['e20'] = ema(df['Close'], 20)
-        l = df.iloc[-1]
-        return round(float(l['Close']), 2), round(float(l['e20']), 2)
-    except:
-        return 24000.0, 23500.0
+        df = yf.download('^NSEI', period='6mo', interval='1d', progress=False, auto_adjust=False)
+        if df is not None and len(df) > 50:
+            df['e20'] = ema(df['Close'], 20)
+            l = df.iloc[-1]
+            return round(float(l['Close']), 2), round(float(l['e20']), 2)
+    except Exception:
+        pass
+    return 24000.0, 23500.0
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_all_stocks():
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        results = [r for r in ex.map(process_symbol, SYMBOLS) if r]
-    return pd.DataFrame(results)
+    results = []
+    # Download in batches of 10 to avoid rate limits
+    batch_size = 10
+    for i in range(0, len(SYMBOLS), batch_size):
+        batch = SYMBOLS[i:i+batch_size]
+        try:
+            raw = yf.download(
+                batch, period='400d', interval='1d',
+                group_by='ticker', auto_adjust=False,
+                progress=False, threads=True, timeout=30
+            )
+            time.sleep(1)  # polite delay between batches
+            for sym in batch:
+                row = process_row(sym, raw)
+                if row:
+                    results.append(row)
+        except Exception:
+            # fallback: try one by one
+            for sym in batch:
+                try:
+                    single = yf.download(sym, period='400d', interval='1d',
+                                         auto_adjust=False, progress=False, timeout=20)
+                    row = process_row(sym, single)
+                    if row:
+                        results.append(row)
+                    time.sleep(0.5)
+                except Exception:
+                    continue
+    return pd.DataFrame(results) if results else pd.DataFrame()
 
-# Sidebar
+# ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## 📈 Swing Algo\n### Indian Market Screener")
     st.divider()
-    min_rr = st.slider("Min Risk/Reward", 1.5, 4.0, 2.0, 0.1)
+    min_rr  = st.slider("Min Risk/Reward", 1.5, 4.0, 2.0, 0.1)
     min_rsi = st.slider("Min RSI", 40, 60, 45)
     max_rsi = st.slider("Max RSI", 55, 75, 65)
     sectors = st.multiselect("Sector Filter",
@@ -151,7 +204,7 @@ with st.sidebar:
         st.rerun()
     st.caption(f"Auto-refresh every 5 min\nLast: {datetime.now().strftime('%d %b %H:%M')}")
     st.divider()
-    st.markdown("""**Conditions Applied:**
+    st.markdown("""**Conditions:**
 - MCap > 5000 Cr
 - Vol > SMA10 x 1.2
 - Close > EMA200, EMA50
@@ -166,10 +219,10 @@ with st.sidebar:
 - Nifty > EMA20
 - A/D Ratio > 1""")
 
-# Load data
+# ── Main ────────────────────────────────────────────────────────────────────────
 st.markdown("## 📈 Swing Algo Dashboard — NSE/BSE")
 
-with st.spinner("Screening 43 NSE stocks... first load ~60 sec"):
+with st.spinner("⏳ Downloading & screening NSE stocks... (~30-60 sec)"):
     df = fetch_all_stocks()
     vix = fetch_vix()
     nifty, nifty_e20 = fetch_nifty()
@@ -177,8 +230,9 @@ with st.spinner("Screening 43 NSE stocks... first load ~60 sec"):
 
 market_pass = vix < 20 and nifty > nifty_e20 and ad_ratio > 1
 
-if df.empty:
-    st.error("No data loaded. Check internet connection.")
+if df is None or df.empty:
+    st.error("⚠️ Could not load stock data. Yahoo Finance may be rate-limiting. Wait 2 minutes and click 🔄 Refresh.")
+    st.info("💡 Tip: This is a known limitation of free data sources on cloud servers. Data will load on retry.")
     st.stop()
 
 df['Pass'] = (
@@ -200,7 +254,7 @@ if sectors:
 
 qualified = df[df['Pass']].sort_values(['RR', 'Upside_Pct'], ascending=[False, False]).reset_index(drop=True)
 
-# KPI Row
+# ── KPI Row ────────────────────────────────────────────────────────────────────
 c1, c2, c3, c4, c5, c6 = st.columns(6)
 def mcard(col, lbl, val, ok=None):
     clr = "green" if ok is True else ("red" if ok is False else "")
@@ -215,27 +269,27 @@ mcard(c6, "Market Signal", "GO" if market_pass else "WAIT", market_pass)
 
 st.markdown("---")
 
-tab1, tab2, tab3, tab4 = st.tabs(["Qualified Signals", "All Stocks", "Charts", "Condition Check"])
+tab1, tab2, tab3, tab4 = st.tabs(["🎯 Qualified Signals", "📊 All Stocks", "📉 Charts", "🔬 Condition Check"])
 
 with tab1:
     if qualified.empty:
-        st.warning("No stocks qualify all conditions right now. Adjust filters or wait for better market conditions.")
+        st.warning("⚠️ No stocks qualify all conditions right now. Try adjusting RSI range or Min R:R in sidebar.")
     else:
-        st.success(f"{len(qualified)} stock(s) passed all 13 conditions")
+        st.success(f"✅ {len(qualified)} stock(s) passed all 13 conditions")
         for _, r in qualified.iterrows():
             with st.container():
                 a, b, c, d, e, f, g, h = st.columns([1.6, 1, 1, 1, 0.8, 0.8, 0.8, 0.8])
-                a.markdown(f"**{r.Symbol}**<br><small style='color:#8B9AB0'>{r.Sector} | MCap Rs{r.MCap_Cr:,.0f}Cr</small>", unsafe_allow_html=True)
-                b.markdown(f"**CMP**<br><span style='color:#00D4FF;font-size:18px'>Rs{r.CMP:,.2f}</span>", unsafe_allow_html=True)
-                c.markdown(f"**Target**<br><span style='color:#2ECC71;font-size:18px'>Rs{r.Target:,.2f}</span>", unsafe_allow_html=True)
-                d.markdown(f"**Stop Loss**<br><span style='color:#E84040;font-size:18px'>Rs{r.SL:,.2f}</span>", unsafe_allow_html=True)
+                a.markdown(f"**{r.Symbol}**<br><small style='color:#8B9AB0'>{r.Sector} | MCap ₹{r.MCap_Cr:,.0f}Cr</small>", unsafe_allow_html=True)
+                b.markdown(f"**CMP**<br><span style='color:#00D4FF;font-size:18px'>₹{r.CMP:,.2f}</span>", unsafe_allow_html=True)
+                c.markdown(f"**Target**<br><span style='color:#2ECC71;font-size:18px'>₹{r.Target:,.2f}</span>", unsafe_allow_html=True)
+                d.markdown(f"**Stop Loss**<br><span style='color:#E84040;font-size:18px'>₹{r.SL:,.2f}</span>", unsafe_allow_html=True)
                 e.markdown(f"**Upside**<br><span style='color:#F5A623'>{r.Upside_Pct:.1f}%</span>", unsafe_allow_html=True)
                 f.markdown(f"**R:R**<br><span style='color:#9B59B6'>{r.RR:.2f}x</span>", unsafe_allow_html=True)
                 g.markdown(f"**RSI**<br>{r.RSI:.1f}", unsafe_allow_html=True)
                 h.markdown(f"**ATR%**<br>{r.ATR_Pct:.1f}%", unsafe_allow_html=True)
             st.divider()
         csv = qualified[['Symbol','Sector','CMP','Target','SL','RR','Upside_Pct','Risk_Pct','RSI','ATR_Pct','MACD_Hist','Volume','MCap_Cr']].to_csv(index=False)
-        st.download_button("Download Signals CSV", csv, "swing_signals.csv", "text/csv")
+        st.download_button("⬇️ Download Signals CSV", csv, "swing_signals.csv", "text/csv")
 
 with tab2:
     disp = df[['Symbol','Sector','CMP','Target','SL','RR','RSI','MACD_Hist','ATR_Pct','Upside_Pct','Volume','MCap_Cr','Pass']].copy()
@@ -276,7 +330,7 @@ with tab3:
             fig4.update_layout(paper_bgcolor='#080E1A', plot_bgcolor='#0D1117', font_color='#E0E0E0')
             st.plotly_chart(fig4, use_container_width=True)
     else:
-        st.info("No qualified stocks to chart. Try relaxing filters.")
+        st.info("No qualified stocks to chart. Try relaxing sidebar filters.")
 
 with tab4:
     cd = df[['Symbol', 'Sector']].copy()
